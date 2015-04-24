@@ -32,13 +32,10 @@ class SpiceController(object):
              authorize(context)
              instance = common.get_instance(compute.API(), context, id, want_objects=True)
              spice_dict = self.compute_rpcapi.get_spice_console(context,
-                            instance=instance, console_type='spice-html5')
+                            instance=instance, console_type='spice')
 
-             import sys, socket
-             result = socket.getaddrinfo(instance.host, None, 0, socket.SOCK_STREAM)
-             host = result[0][4][0]
-             return {'spice':{'host':spice_dict['host'], 'port':spice_dict['port'], 'tlsPort':spice_dict['tlsPort']}}
-             return url
+             
+             return spice_dict['access_url']
          
          def update(self, req):
              return None

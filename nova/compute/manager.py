@@ -640,7 +640,11 @@ class ComputeManager(manager.Manager):
         self.driver = driver.load_compute_driver(self.virtapi, compute_driver)
         self.use_legacy_block_device_info = \
                             self.driver.need_legacy_block_device_info
-
+        
+        import ConfigParser
+        self.config = ConfigParser.ConfigParser()
+        self.config.readfp(open("/etc/nova/nova.conf","rb"))
+        
     def _get_resource_tracker(self, nodename):
         rt = self._resource_tracker_dict.get(nodename)
         if not rt:
@@ -4395,9 +4399,12 @@ class ComputeManager(manager.Manager):
         context = context.elevated()
         LOG.debug("Getting spice console", instance=instance)
         token = str(uuid.uuid4())
-
+        output = self.driver.get_console_output(context, instance)
         if not CONF.spice.enabled:
             raise exception.ConsoleTypeUnavailable(console_type=console_type)
+        
+       
+
 
         if console_type == 'spice-html5':
             # For essex, spicehtml5proxy_base_url must include the full path
@@ -4409,20 +4416,12 @@ class ComputeManager(manager.Manager):
             console = self.driver.get_spice_console(context, instance)
             connect_info = console.get_connection_info(token, access_url)
             
-            from nova import compute
-            from nova.virt.libvirt import driver
-            from nova.api.openstack import common
-            from nova.virt import fake
-            #instance = common.get_instance(compute.API(), context, id, want_objects=True)
-            conn = driver.LibvirtDriver(fake.FakeVirtAPI(), False)
-            spice_dict = conn.get_spice_console(context, instance)
-             
-            import sys, socket
-            result = socket.getaddrinfo(instance.host, None, 0, socket.SOCK_STREAM)
-            host = result[0][4][0]
-            return {'spice':{'host':host, 'port':spice_dict.port, 'tlsPort':spice_dict.tlsPort}}
-            
-            
+            spice_host = self.config.get("spice","host")
+
+            access_url = '{"spice":{"host":"%s", "port":"%s", "tlsPort":"%s"}}' % (spice_host,console.port,console.tlsPort)
+            connect_info['access_url'] = access_url
+            return connect_info
+        
         else:
             raise exception.ConsoleTypeInvalid(console_type=console_type)
 
