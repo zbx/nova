@@ -1982,3 +1982,17 @@ class LibvirtConfigGuestMetaNovaOwner(LibvirtConfigObject):
             project.set("uuid", self.projectid)
             meta.append(project)
         return meta
+
+class LibvirtConfigGuestSound(LibvirtConfigGuestDevice):
+    def __init__(self, **kwargs):
+        super(LibvirtConfigGuestSound, self).__init__(
+            root_name='sound',
+            **kwargs)
+        self.model = None
+        self.period = None
+
+    def format_dom(self):
+        dev = super(LibvirtConfigGuestSound, self).format_dom()
+        dev.set('model', str(self.model))
+        dev.append(etree.Element('stats', period=str(self.period)))
+        return dev

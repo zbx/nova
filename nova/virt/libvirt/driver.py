@@ -3993,6 +3993,7 @@ class LibvirtDriver(driver.ComputeDriver):
         if CONF.spice.enabled and CONF.spice.agent_enabled and \
                 CONF.libvirt.virt_type not in ('lxc', 'uml', 'xen'):
             channel = vconfig.LibvirtConfigGuestChannel()
+            channel.type = "spicevmc"
             channel.target_name = "com.redhat.spice.0"
             guest.add_device(channel)
 
@@ -4128,6 +4129,12 @@ class LibvirtDriver(driver.ComputeDriver):
                 balloon.model = 'xen'
             balloon.period = CONF.libvirt.mem_stats_period_seconds
             guest.add_device(balloon)
+            
+         #add sound   
+        if  True:
+            sound = vconfig.LibvirtConfigGuestSound()
+            sound.model = "ich6"
+            guest.add_device(sound)
 
         return guest
 

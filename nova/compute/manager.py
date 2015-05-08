@@ -4411,7 +4411,7 @@ class ComputeManager(manager.Manager):
             # including the html file (like http://myhost/spice_auto.html)
             access_url = '%s?token=%s' % (CONF.spice.html5proxy_base_url,
                                           token)
-        if console_type == 'spice':
+        elif console_type == 'spice':
             access_url = '%s?token=%s' % (CONF.spice.html5proxy_base_url, token)
             console = self.driver.get_spice_console(context, instance)
             connect_info = console.get_connection_info(token, access_url)
