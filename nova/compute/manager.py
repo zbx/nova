@@ -3024,6 +3024,7 @@ class ComputeManager(manager.Manager):
         # request getting here the task state may have been cleared so we set
         # it again and things continue normally
         try:
+            LOG.audit(_('==start=======================================>'), context=context,instance=instance)
             instance.task_state = task_states.IMAGE_SNAPSHOT
             instance.save(
                         expected_task_state=task_states.IMAGE_SNAPSHOT_PENDING)
@@ -3069,9 +3070,10 @@ class ComputeManager(manager.Manager):
                                   expected_state=expected_task_state):
                 instance.task_state = task_state
                 instance.save(expected_task_state=expected_state)
-
+            LOG.audit(_('===snapshot-start=======================================>'), context=context,instance=instance)
             self.driver.snapshot(context, instance, image_id,
                                  update_task_state)
+            LOG.audit(_('===snapshot-end=======================================>'), context=context,instance=instance)
 
             instance.task_state = None
             instance.save(expected_task_state=task_states.IMAGE_UPLOADING)

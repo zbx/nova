@@ -85,7 +85,7 @@ class ComputeAPI(object):
         version = '3.0'
         cctxt = self.client.prepare(server=_compute_host(None, instance),
                 version=version)
-        return cctxt.call(ctxt, 'snapshot_create',
+        cctxt.call(ctxt, 'snapshot_create',
                    instance=instance,
                    snapshot_name=snapshot_name,
                    snapshot_desc=snapshot_desc)

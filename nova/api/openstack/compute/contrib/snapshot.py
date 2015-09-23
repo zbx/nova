@@ -3,7 +3,7 @@ from nova import compute
 from nova.api.openstack import extensions
 from nova.openstack.common import log as logging
 from nova.api.openstack import wsgi
-from nova.compute import rpcapi_snapshot as compute_rpcapi
+from nova.sihuatech.snapshot import rpcapi as compute_rpcapi
 
 authorize = extensions.extension_authorizer('compute', 'snapshot')
 
@@ -64,7 +64,7 @@ class Snapshot(extensions.ExtensionDescriptor):
 
     name = "snapshot"
     alias = "snapshot"
-    namespace = "www.sihatech.com"
+    namespace = "www.sihuatech.com"
     updated = "2015-08-26 00:00:01"
 
     def get_controller_extensions(self):
