@@ -39,6 +39,15 @@ from nova.compute.manager import *
 from nova import utils
 import os
 
+interval_opts = [
+    cfg.IntOpt("update_snapshot_db_interval",
+               default=60,
+               help=""),
+]
+CONF = cfg.CONF
+CONF.register_opts(interval_opts)
+
+
 class ComputeManager(nova.compute.manager.ComputeManager):
     """Manages the running instances from creation to destruction."""
 
@@ -56,7 +65,7 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         except Exception:
             msg = 'snapshot_list is Failed,instance_id=%s', instance["uuid"]
             LOG.exception(msg, instance=instance)
-            return Response(status=500)
+            raise
 
 
     def snapshot_create(self, context, instance, snapshot_name, snapshot_desc=u""):
@@ -65,24 +74,19 @@ class ComputeManager(nova.compute.manager.ComputeManager):
             LOG.audit(_('snapshot_create'), context=context, instance=instance)
             conn = libvirt.open('qemu:///system')
             dom = conn.lookupByName(instance['name'])
-            if not snapshot_desc:
-                snapshot_desc=u""
             parent_name = ""
             try:
                 current_snapshot = dom.snapshotCurrent()
                 parent_name = current_snapshot.getName()
             except Exception:
                 pass
-
             # 记录到数据库
-            parent_name_utf8=base64.b64decode(parent_name).decode('utf-8');
-            self._save(instance, snapshot_name, snapshot_desc, parent_name_utf8)
-            # 中文必须为utf8编码
-            snapshot_name_utf8 = base64.b64encode(snapshot_name.encode('utf-8'))
-            snapshot_desc_utf8 = base64.b64encode(snapshot_desc.encode('utf-8'))
-            
-            desc = "<domainsnapshot><name>%s</name><description>%s</description></domainsnapshot>" % (snapshot_name_utf8, snapshot_desc_utf8);
-            
+            parent_name_str=self._unicode_to_str(parent_name)
+            self._save(instance, snapshot_name, snapshot_desc, parent_name_str)
+            # 中文必须为str,不能是unicode
+            snapshot_name_str = self._unicode_to_str(snapshot_name)
+            snapshot_desc_str = self._unicode_to_str(snapshot_desc)
+            desc = "<domainsnapshot><name>%s</name><description>%s</description></domainsnapshot>" % (snapshot_name_str, snapshot_desc_str);
             #生成快照xml
             snapshot_xml_file="/tmp/"+uuid.uuid4().hex + '.xml'
             try:
@@ -93,17 +97,14 @@ class ComputeManager(nova.compute.manager.ComputeManager):
             finally:
                 if os.path.exists(snapshot_xml_file):
                     os.remove(snapshot_xml_file)
-            
-            snapshot = dom.snapshotLookupByName(snapshot_name_utf8)
-
+            snapshot = dom.snapshotLookupByName(snapshot_name_str)
             # 快照创建完成后更改状态
             self._update(instance, snapshot_name, {'state':1})
-            str = json.dumps(self._toDict(snapshot), ensure_ascii=False)
-            return str
+            return json.dumps(self._toDict(snapshot), ensure_ascii=False)
         except (exception.InstanceNotFound, exception.UnexpectedDeletingTaskStateError):
             msg = 'snapshot_create is Failed,instance_id=%s,snapshot_name=%', (instance["uuid"], snapshot_name)
             LOG.exception(msg, instance=instance)
-            return Response(status=500)
+            raise
 
     def snapshot_delete(self, context, instance, snapshot_name):
         context = context.elevated()
@@ -111,15 +112,15 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         try:
             LOG.audit(_('snapshot_delete'), context=context, instance=instance)
             conn = libvirt.open('qemu:///system')
-            snapshot_name_utf8 = base64.b64encode(snapshot_name.encode('utf-8')) #不确定snapshot_name的编码,此处转换有可能出错
+            snapshot_name_str = self._unicode_to_str(snapshot_name)
             dom = conn.lookupByName(instance['name'])
-            snapshot = dom.snapshotLookupByName(snapshot_name_utf8);
+            snapshot = dom.snapshotLookupByName(snapshot_name_str);
             snapshot.delete(0);
             self._update(instance, snapshot_name, {'deleted':1})
         except (exception.InstanceNotFound, exception.UnexpectedDeletingTaskStateError):
             msg = 'snapshot_delete Failed,instance_id=%s,snapshot_name=%', (instance["uuid"], snapshot_name)
             LOG.exception(msg, instance=instance)
-            return Response(status=500)
+            raise
         finally:
             if session:
                 session.close()
@@ -128,16 +129,16 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         context = context.elevated()
         try:
             LOG.audit(_('snapshot_revert'), context=context, instance=instance)
-            snapshot_name_utf8 = base64.b64encode(snapshot_name.encode('utf-8'))
+            snapshot_name_str = self._unicode_to_str(snapshot_name)
             conn = libvirt.open('qemu:///system')
             dom = conn.lookupByName(instance['name'])
-            snapshot = dom.snapshotLookupByName(snapshot_name_utf8);
+            snapshot = dom.snapshotLookupByName(snapshot_name_str);
             dom.revertToSnapshot(snapshot, 0)
-            return Response(status=200)
+            return self._toDict(snapshot)
         except (exception.InstanceNotFound, exception.UnexpectedDeletingTaskStateError):
-            msg = 'snapshot_revert is Failed,instance_id=%s,snapshot_name=%', (instance["uuid"], snapshot_name)
+            msg = 'snapshot_revert is Failed,instance_id=%s,snapshot_name=%s', (instance["uuid"], snapshot_name)
             LOG.exception(msg, instance=instance)
-            return Response(status=500)
+            raise
 
     def snapshot_current(self, context, instance):
         context = context.elevated()
@@ -150,10 +151,36 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         except (exception.InstanceNotFound, exception.UnexpectedDeletingTaskStateError):
             msg = 'snapshot_current is Failed,instance_id=%s', instance["uuid"]
             LOG.exception(msg, instance=instance)
-            return Response(status=500)
+            raise
         except (libvirt.libvirtError):
             return ""
 
+    @periodic_task.periodic_task(spacing=CONF.update_snapshot_db_interval)
+    def update_snapshot_db(self, context):
+        #定时任务,定时把实例的快照信息写到数据库中.
+        LOG.audit("update_snapshot_db start...")
+        instances = self._get_instances_on_driver(context)
+        for instance in instances:
+            snapshots=self._snapshot_list(instance)
+            for snapshot in snapshots:
+                if not self._has_snapshot(instance,snapshot.getName()):
+                    self._save_snapshot(instance,snapshot)
+                    
+    def guest_set_user_password(self, context, instance, user_name, user_password):
+        #设置实例密码
+        context = context.elevated()
+        LOG.audit(_('guest_set_user_password'), context=context, instance=instance)
+        user_password = base64.b64encode(user_password)
+        args= '''{ "execute": "guest-set-user-password", "arguments": { "crypted": false,"username": "%s","password": "%s" }}''' % (user_name,user_password)
+        try:
+            cmd = ('virsh', 'qemu-agent-command', instance['name'],args)
+            utils.execute(*cmd)
+            LOG.info("user_name:%s set password success." % user_name)
+            return True
+        except Exception:
+            msg = 'set_user_password Failed,instance_id=%s', instance["uuid"] 
+            LOG.exception(msg, instance=instance)
+            raise
 ##=========================================================================================================
     def _toDict(self, snapshot):
         dict = {}
@@ -182,23 +209,19 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         element = domain.find('description')
         if element is not None:
             try:
-                return base64.b64decode(element.text).decode('utf-8')
+                return self._str_to_unicode(element.text)
             except Exception:
-                if isinstance(element.text, unicode):
-                    return element.text
-                return element.text.decode('utf-8')
+                return u""
         else:
-            return ""
+            return u""
         
     def _getName(self, snapshot):
         snapshot_name = snapshot.getName();
         try:
-            snapshot_name_utf8 = base64.b64decode(snapshot_name).decode('utf-8')
-            return snapshot_name_utf8
+            snapshot_name = self._str_to_unicode(snapshot_name)
+            return snapshot_name
         except Exception:
-            if isinstance(snapshot_name, unicode):
-                return snapshot_name
-            return snapshot_name.decode('utf-8')
+            return u""
     
     def _save(self, instance, snapshot_name, snapshot_desc, parent_name):
         session = Session()
@@ -208,6 +231,27 @@ class ComputeManager(nova.compute.manager.ComputeManager):
             session.commit()
         except Exception:
             pass
+        finally:
+            if session:
+                session.close()
+
+    def _save_snapshot(self, instance, snapshot):
+        snapshot_name=snapshot.getName()
+        snapshot_desc=self._getDescription(snapshot)
+        parent_name = ""
+        try:
+            parent_name=snapshot.getParent().getName()
+        except:
+            pass
+        # 记录到数据库
+        session = Session()
+        try:
+            snapshot_record = Snapshot(name=snapshot_name,desc=snapshot_desc,parent=parent_name,instance_uuid=instance["uuid"])
+            session.add(snapshot_record)
+            session.commit()
+            LOG.info("save snapshot:%s ,instance:%s" % (self._str_to_unicode(snapshot_name),instance["uuid"]))
+        except Exception:
+            raise
         finally:
             if session:
                 session.close()
@@ -230,4 +274,41 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         finally:
             if session:
                 session.close()
+
+    def _has_snapshot(self, instance, snapshot_name):
+        session = Session()
+        try:
+            snapshot_record = session.query(Snapshot).filter(Snapshot.deleted == 0,Snapshot.instance_uuid == instance["uuid"],Snapshot.name == snapshot_name).first()
+            return snapshot_record
+        except Exception:
+            raise
+        finally:
+            if session:
+                session.close()
+
+    def _snapshot_list(self, instance):
+        try:
+            conn = libvirt.open('qemu:///system')
+            dom = conn.lookupByName(instance['name'])
+            snapshotList = dom.listAllSnapshots()
+            return snapshotList
+        except Exception:
+            msg = 'snapshot_list is Failed,instance_id=%s', instance["uuid"]
+            LOG.exception(msg, instance=instance)
+            raise
+    
+    def _str_to_unicode(self,str):
+        #str转为unicode
+        try:
+            return str.decode('utf-8')
+        except Exception:
+            return str
+
+    def _unicode_to_str(self,str):
+        #unicode转为str
+        try:
+            return str.encode("utf-8")
+        except Exception:
+            return str
+
 

@@ -120,3 +120,12 @@ class ComputeAPI(object):
         return cctxt.call(ctxt, 'snapshot_current',
                    instance=instance)
 
+    def guest_set_user_password(self, ctxt, instance,user_name, user_password):
+        version = '3.0'
+        cctxt = self.client.prepare(server=_compute_host(None, instance),
+                version=version)
+        return cctxt.call(ctxt, 'guest_set_user_password',
+                   instance=instance,
+                   user_name=user_name,
+                   user_password=user_password)
+

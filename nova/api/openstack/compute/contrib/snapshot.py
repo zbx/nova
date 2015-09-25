@@ -3,7 +3,7 @@ from nova import compute
 from nova.api.openstack import extensions
 from nova.openstack.common import log as logging
 from nova.api.openstack import wsgi
-from nova.sihuatech.snapshot import rpcapi as compute_rpcapi
+from nova.sihuatech import rpcapi as compute_rpcapi
 
 authorize = extensions.extension_authorizer('compute', 'snapshot')
 
