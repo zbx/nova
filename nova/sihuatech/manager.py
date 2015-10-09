@@ -100,6 +100,7 @@ class ComputeManager(nova.compute.manager.ComputeManager):
             snapshot = dom.snapshotLookupByName(snapshot_name_str)
             # 快照创建完成后更改状态
             self._update(instance, snapshot_name, {'state':1})
+            LOG.audit(_('snapshot_create success'), context=context, instance=instance)
             return json.dumps(self._toDict(snapshot), ensure_ascii=False)
         except (exception.InstanceNotFound, exception.UnexpectedDeletingTaskStateError):
             msg = 'snapshot_create is Failed,instance_id=%s,snapshot_name=%', (instance["uuid"], snapshot_name)
@@ -134,6 +135,7 @@ class ComputeManager(nova.compute.manager.ComputeManager):
             dom = conn.lookupByName(instance['name'])
             snapshot = dom.snapshotLookupByName(snapshot_name_str);
             dom.revertToSnapshot(snapshot, 0)
+            LOG.audit(_('snapshot_revert success'), context=context, instance=instance)
             return self._toDict(snapshot)
         except (exception.InstanceNotFound, exception.UnexpectedDeletingTaskStateError):
             msg = 'snapshot_revert is Failed,instance_id=%s,snapshot_name=%s', (instance["uuid"], snapshot_name)
@@ -246,7 +248,7 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         # 记录到数据库
         session = Session()
         try:
-            snapshot_record = Snapshot(name=snapshot_name,desc=snapshot_desc,parent=parent_name,instance_uuid=instance["uuid"])
+            snapshot_record = Snapshot(name=snapshot_name,desc=snapshot_desc,parent=parent_name,instance_uuid=instance["uuid"],state=1)
             session.add(snapshot_record)
             session.commit()
             LOG.info("save snapshot:%s ,instance:%s" % (self._str_to_unicode(snapshot_name),instance["uuid"]))
@@ -263,10 +265,10 @@ class ComputeManager(nova.compute.manager.ComputeManager):
             if snapshot_record:
                 if args.has_key("deleted"):
                     snapshot_record.deleted = args["deleted"]
-                    snapshot_record.delete_at = timeutils.utcnow()
+                    snapshot_record.deleted_at = time.strftime("%Y-%m-%d %X", time.localtime())
                 if args.has_key("state"):
                     snapshot_record.state = args["state"]
-                snapshot_record.update_at = timeutils.utcnow()
+                snapshot_record.updated_at = time.strftime("%Y-%m-%d %X", time.localtime())
                 session.add(snapshot_record)
             session.commit()
         except Exception:
