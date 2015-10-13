@@ -59,6 +59,7 @@ class UsedLimitsController(wsgi.Controller):
             'totalInstancesUsed': 'instances',
             'totalFloatingIpsUsed': 'floating_ips',
             'totalSecurityGroupsUsed': 'security_groups',
+            'totalInstanceSnapshotsUsed': 'snapshots',
         }
         if self.ext_mgr.is_loaded('os-server-group-quotas'):
             quota_map['totalServerGroupsUsed'] = 'server_groups'

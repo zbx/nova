@@ -90,7 +90,11 @@ quota_opts = [
     cfg.StrOpt('quota_driver',
                default='nova.quota.DbQuotaDriver',
                help='Default driver to use for quota checks'),
+    cfg.IntOpt('quota_snapshots',
+               default=100,
+               help='Number of test'),
     ]
+
 
 CONF = cfg.CONF
 CONF.register_opts(quota_opts)
@@ -1450,6 +1454,7 @@ resources = [
     CountableResource('server_group_members',
                       _server_group_count_members_by_user,
                       'quota_server_group_members'),
+    ReservableResource('snapshots', '_sync_snapshots', 'quota_snapshots'),
     ]
 
 

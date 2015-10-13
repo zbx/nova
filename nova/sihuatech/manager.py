@@ -38,6 +38,7 @@ import nova.context
 from nova.compute.manager import *
 from nova import utils
 import os
+from nova import objects
 
 interval_opts = [
     cfg.IntOpt("update_snapshot_db_interval",
@@ -46,7 +47,6 @@ interval_opts = [
 ]
 CONF = cfg.CONF
 CONF.register_opts(interval_opts)
-
 
 class ComputeManager(nova.compute.manager.ComputeManager):
     """Manages the running instances from creation to destruction."""
@@ -70,6 +70,9 @@ class ComputeManager(nova.compute.manager.ComputeManager):
 
     def snapshot_create(self, context, instance, snapshot_name, snapshot_desc=u""):
         context = context.elevated()
+        #申请快照配额
+        quotas = objects.Quotas(context)
+        quotas.reserve(context, snapshots=1)
         try:
             LOG.audit(_('snapshot_create'), context=context, instance=instance)
             conn = libvirt.open('qemu:///system')
@@ -82,7 +85,6 @@ class ComputeManager(nova.compute.manager.ComputeManager):
                 pass
             # 记录到数据库
             parent_name_str=self._unicode_to_str(parent_name)
-            self._save(instance, snapshot_name, snapshot_desc, parent_name_str)
             # 中文必须为str,不能是unicode
             snapshot_name_str = self._unicode_to_str(snapshot_name)
             snapshot_desc_str = self._unicode_to_str(snapshot_desc)
@@ -98,17 +100,23 @@ class ComputeManager(nova.compute.manager.ComputeManager):
                 if os.path.exists(snapshot_xml_file):
                     os.remove(snapshot_xml_file)
             snapshot = dom.snapshotLookupByName(snapshot_name_str)
-            # 快照创建完成后更改状态
-            self._update(instance, snapshot_name, {'state':1})
+            # 快照创建完成后写到数据库
+            self._save(instance, snapshot_name, snapshot_desc, parent_name_str)
             LOG.audit(_('snapshot_create success'), context=context, instance=instance)
+            #提交配额
+            quotas.commit()
             return json.dumps(self._toDict(snapshot), ensure_ascii=False)
-        except (exception.InstanceNotFound, exception.UnexpectedDeletingTaskStateError):
+        except Exception:
             msg = 'snapshot_create is Failed,instance_id=%s,snapshot_name=%', (instance["uuid"], snapshot_name)
             LOG.exception(msg, instance=instance)
+            quotas.rollback()
             raise
 
     def snapshot_delete(self, context, instance, snapshot_name):
         context = context.elevated()
+        #释放配额
+        quotas = objects.Quotas(context)
+        quotas.reserve(context, snapshots=-1)
         session = Session()
         try:
             LOG.audit(_('snapshot_delete'), context=context, instance=instance)
@@ -118,9 +126,12 @@ class ComputeManager(nova.compute.manager.ComputeManager):
             snapshot = dom.snapshotLookupByName(snapshot_name_str);
             snapshot.delete(0);
             self._update(instance, snapshot_name, {'deleted':1})
-        except (exception.InstanceNotFound, exception.UnexpectedDeletingTaskStateError):
+            #提交配额
+            quotas.commit()
+        except Exception:
             msg = 'snapshot_delete Failed,instance_id=%s,snapshot_name=%', (instance["uuid"], snapshot_name)
             LOG.exception(msg, instance=instance)
+            quotas.rollback()
             raise
         finally:
             if session:
@@ -228,7 +239,7 @@ class ComputeManager(nova.compute.manager.ComputeManager):
     def _save(self, instance, snapshot_name, snapshot_desc, parent_name):
         session = Session()
         try:
-            snapshot_record = Snapshot(name=snapshot_name,desc=snapshot_desc,parent=parent_name,instance_uuid=instance["uuid"])
+            snapshot_record = Snapshot(name=snapshot_name,desc=snapshot_desc,parent=parent_name,instance_uuid=instance["uuid"],project_id=instance["project_id"],user_id=instance["user_id"],state=1)
             session.add(snapshot_record)
             session.commit()
         except Exception:
@@ -246,17 +257,7 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         except:
             pass
         # 记录到数据库
-        session = Session()
-        try:
-            snapshot_record = Snapshot(name=snapshot_name,desc=snapshot_desc,parent=parent_name,instance_uuid=instance["uuid"],state=1)
-            session.add(snapshot_record)
-            session.commit()
-            LOG.info("save snapshot:%s ,instance:%s" % (self._str_to_unicode(snapshot_name),instance["uuid"]))
-        except Exception:
-            raise
-        finally:
-            if session:
-                session.close()
+        self._save(instance, snapshot_name, snapshot_desc, parent_name)
         
     def _update(self, instance, snapshot_name, args):
         session = Session()
@@ -313,4 +314,6 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         except Exception:
             return str
 
-
+    def _rollback_quota(context,reservation):
+        if reservation:
+            QUOTAS.rollback(context, reservation)

@@ -35,6 +35,7 @@ class ViewBuilder(object):
             "injected_file_content_bytes": ["maxPersonalitySize"],
             "security_groups": ["maxSecurityGroups"],
             "security_group_rules": ["maxSecurityGroupRules"],
+            "snapshots": ["maxInstanceSnapshots"],
     }
 
     def build(self, rate_limits, absolute_limits):

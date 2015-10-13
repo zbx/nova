@@ -16,6 +16,8 @@ class Snapshot(Base,BaseMixin):
 
     id = Column(Integer, primary_key=True)
     instance_uuid = Column(String(36))
+    project_id = Column(String(36))
+    user_id = Column(String(36))
     name = Column(String(32))
     desc = Column(String(32))
     parent = Column(String(32))

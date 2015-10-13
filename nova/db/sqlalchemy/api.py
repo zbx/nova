@@ -63,6 +63,9 @@ from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
 from nova.openstack.common import uuidutils
 from nova import quota
+from nova.sihuatech.quota import QuotaManager
+
+quotaManager = QuotaManager()
 
 db_opts = [
     cfg.StrOpt('osapi_compute_unique_server_name_scope',
@@ -319,6 +322,9 @@ def _sync_instances(context, project_id, user_id, session):
                 context, project_id, user_id, session)))
 
 
+def _sync_snapshots(context, project_id, user_id, session):
+    return dict(snapshots= quotaManager._get_snapshots_by_project(context.project_id))
+
 def _sync_floating_ips(context, project_id, user_id, session):
     return dict(floating_ips=_floating_ip_count_by_project(
                 context, project_id, session))
@@ -344,6 +350,7 @@ QUOTA_SYNC_FUNCTIONS = {
     '_sync_fixed_ips': _sync_fixed_ips,
     '_sync_security_groups': _sync_security_groups,
     '_sync_server_groups': _sync_server_groups,
+    '_sync_snapshots': _sync_snapshots,
 }
 
 ###################
@@ -3164,7 +3171,6 @@ def _get_project_user_quota_usages(context, session, project_id,
         if row.user_id is None or row.user_id == user_id:
             user_result[row.resource] = row
     return proj_result, user_result
-
 
 @require_context
 @_retry_on_deadlock
