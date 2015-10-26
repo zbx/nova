@@ -42,7 +42,7 @@ from nova import objects
 
 interval_opts = [
     cfg.IntOpt("update_snapshot_db_interval",
-               default=60,
+               default=300,
                help=""),
 ]
 CONF = cfg.CONF
@@ -189,7 +189,6 @@ class ComputeManager(nova.compute.manager.ComputeManager):
             cmd = ('virsh', 'qemu-agent-command', instance['name'],args)
             utils.execute(*cmd)
             LOG.info("user_name:%s set password success." % user_name)
-            return True
         except Exception:
             msg = 'set_user_password Failed,instance_id=%s', instance["uuid"] 
             LOG.exception(msg, instance=instance)
@@ -204,6 +203,7 @@ class ComputeManager(nova.compute.manager.ComputeManager):
             parent = snapshot.getParent();
             dict["parent_name"] = self._getName(parent)
             return dict
+
         except (libvirt.libvirtError):
             dict["parent_name"] = "-1"
             return dict
