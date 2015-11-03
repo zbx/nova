@@ -58,6 +58,20 @@ class SnapshotController(wsgi.Controller):
         instance = common.get_instance(compute.API(), context, id, want_objects=True)
         return self.compute_rpcapi.snapshot_current(context, instance)
 
+    @wsgi.action('live_migrate_delete_snapshot_meta')
+    def live_migrate_delete_snapshot_meta(self, req, id, body):
+        context = req.environ['nova.context']
+        authorize(context)
+        instance = common.get_instance(compute.API(), context, id, want_objects=True)
+        return self.compute_rpcapi.live_migrate_delete_snapshot_meta(context, instance)
+    
+    @wsgi.action('live_migrate_redefine_snapshot_meta')
+    def live_migrate_redefine_snapshot_meta(self, req, id, body):
+        context = req.environ['nova.context']
+        authorize(context)
+        instance = common.get_instance(compute.API(), context, id, want_objects=True)
+        return self.compute_rpcapi.live_migrate_redefine_snapshot_meta(context, instance)
+
 
 class Snapshot(extensions.ExtensionDescriptor):
     """Snapshot ExtensionDescriptor implementation"""

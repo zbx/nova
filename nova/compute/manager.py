@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # Copyright 2011 Justin Santa Barbara
@@ -91,7 +92,14 @@ from nova.virt import virtapi
 from nova import volume
 from nova.volume import encryptors
 
+import libvirt
+from nova.sihuatech.orm import *
+from nova.sihuatech.model import Snapshot
+import datetime
+from nova.openstack.common import lockutils
+from lxml import etree
 
+MIGRATION_TIMEOUT=60*60
 compute_opts = [
     cfg.StrOpt('console_host',
                default=socket.gethostname(),
@@ -640,11 +648,11 @@ class ComputeManager(manager.Manager):
         self.driver = driver.load_compute_driver(self.virtapi, compute_driver)
         self.use_legacy_block_device_info = \
                             self.driver.need_legacy_block_device_info
-        
+
         import ConfigParser
         self.config = ConfigParser.ConfigParser()
         self.config.readfp(open("/etc/nova/nova.conf","rb"))
-        
+
     def _get_resource_tracker(self, nodename):
         rt = self._resource_tracker_dict.get(nodename)
         if not rt:
@@ -4404,8 +4412,8 @@ class ComputeManager(manager.Manager):
         output = self.driver.get_console_output(context, instance)
         if not CONF.spice.enabled:
             raise exception.ConsoleTypeUnavailable(console_type=console_type)
-        
-       
+
+
 
 
         if console_type == 'spice-html5':
@@ -4417,13 +4425,13 @@ class ComputeManager(manager.Manager):
             access_url = '%s?token=%s' % (CONF.spice.html5proxy_base_url, token)
             console = self.driver.get_spice_console(context, instance)
             connect_info = console.get_connection_info(token, access_url)
-            
+
             spice_host = self.config.get("spice","host")
 
             access_url = '{"spice":{"host":"%s", "port":"%s", "tlsPort":"%s"}}' % (spice_host,console.port,console.tlsPort)
             connect_info['access_url'] = access_url
             return connect_info
-        
+
         else:
             raise exception.ConsoleTypeInvalid(console_type=console_type)
 
@@ -5016,14 +5024,23 @@ class ComputeManager(manager.Manager):
                               dest, instance=instance)
                 self._rollback_live_migration(context, instance, dest,
                                               block_migration, migrate_data)
+        #迁移时禁止同步快照信息到数据库
+        with lockutils.lock(instance.uuid,lock_file_prefix='nova-snapshot'):
+            #迁移之前,先同步快照信息到数据库
+            self._sync_snapshot_to_db(instance)
+            #迁移之前删除快照元数据
+            self.live_migrate_delete_snapshot_meta(context,instance)
+            # Executing live migration
+            # live_migration might raises exceptions, but
+            # nothing must be recovered in this version.
+            self.driver.live_migration(context, instance, dest,
+                                       self._post_live_migration,
+                                       self._rollback_live_migration,
+                                       block_migration, migrate_data)
 
-        # Executing live migration
-        # live_migration might raises exceptions, but
-        # nothing must be recovered in this version.
-        self.driver.live_migration(context, instance, dest,
-                                   self._post_live_migration,
-                                   self._rollback_live_migration,
-                                   block_migration, migrate_data)
+            #迁移之后恢复快照元数据
+            self.live_migrate_redefine_snapshot_meta(context,instance,dest)
+
 
     def _live_migration_cleanup_flags(self, block_migration, migrate_data):
         """Determine whether disks or intance path need to be cleaned up after
@@ -6289,3 +6306,134 @@ class ComputeManager(manager.Manager):
                     instance.cleaned = True
                 with utils.temporary_mutation(context, read_deleted='yes'):
                     instance.save(context)
+
+    def live_migrate_delete_snapshot_meta(self, context, instance):
+        # 删除所有快照元数据
+        context = context.elevated()
+        try:
+            LOG.audit(_('live_migrate_delete_snapshot_meta start'), context=context, instance=instance)
+            snapshotList = self._snapshot_list(instance)
+            for snapshot in snapshotList:
+                snapshot.delete(libvirt.VIR_DOMAIN_SNAPSHOT_DELETE_METADATA_ONLY)
+            LOG.audit(_('live_migrate_delete_snapshot_meta success'), context=context, instance=instance)
+        except Exception:
+            LOG.exception('live_migrate_delete_snapshot_meta is Failed', instance=instance)
+            raise
+
+    def live_migrate_redefine_snapshot_meta(self, context, instance, host):
+        # 当任务状态为:migrating,不能重建快照,只有当任务状态为:None时才能操作
+        i = 0
+        while i < MIGRATION_TIMEOUT:
+            instance.refresh()
+            i = i + 1
+            time.sleep(1)
+            if instance["task_state"] is None:
+                break
+
+        # 重新定义快照元数据
+        context = context.elevated()
+        session = Session()
+        try:
+            LOG.audit(_('live_migrate_redefine_snapshot_meta start'), context=context, instance=instance)
+            url = 'qemu+tcp://%s/system' % host
+            conn = libvirt.open(url)
+            dom = conn.lookupByName(instance['name'])
+            snapshotList = session.query(Snapshot).filter(Snapshot.deleted == 0, Snapshot.instance_uuid == instance["uuid"]).order_by(Snapshot.created_at)
+            snapshot_dict = dict()
+            current_snapshot=None
+            if snapshotList:
+                for snapshot in snapshotList:
+                    if snapshot.is_current == 1:current_snapshot=snapshot
+                    snapshot_dict[snapshot.name] = snapshot
+
+            flag_redefine = libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_REDEFINE
+            for snapshot in snapshotList:
+                if snapshot.parent is None or snapshot.parent == '':
+                    dom.snapshotCreateXML(snapshot.xml, flag_redefine)
+                else:
+                    parent_snapshot = dom.snapshotLookupByName(snapshot.parent)
+                    dom.revertToSnapshot(parent_snapshot, 0)
+                    dom.snapshotCreateXML(snapshot.xml, flag_redefine)
+            snapshot = dom.snapshotLookupByName(current_snapshot.name)
+            dom.revertToSnapshot(snapshot, 0)
+            LOG.audit(_('live_migrate_redefine_snapshot_meta success'), context=context, instance=instance)
+        except Exception:
+            LOG.exception('live_migrate_redefine_snapshot_meta is Failed', instance=instance)
+            raise
+        finally:
+            if session:
+                session.close()
+
+    def _sync_snapshot_to_db(self, instance):
+        # 将快照同步到数据库(先删除,再生成)
+        session = Session()
+        try:
+            LOG.audit(_('_sync_snapshot_to_db start'), instance=instance)
+            snapshots = self._snapshot_list(instance)
+            if snapshots:
+                # 删除所有快照记录
+                session.query(Snapshot).filter(Snapshot.deleted == 0, Snapshot.instance_uuid == instance["uuid"]).delete(synchronize_session=False)
+                # 重新生成快照记录
+                for snapshot in snapshots:
+                    snapshot_name = snapshot.getName()
+                    snapshot_desc = self._get_description(snapshot)
+                    parent_name = self._get_parentName(snapshot)
+                    snapshot_xml = snapshot.getXMLDesc()
+                    # 记录到数据库
+                    db_snapshot = Snapshot(created_at=datetime.datetime.strptime(self._get_creationTime(snapshot), "%Y-%m-%d %H:%M:%S"), name=snapshot_name, desc=snapshot_desc, parent=parent_name,
+                                           instance_uuid=instance["uuid"], project_id=instance["project_id"], user_id=instance["user_id"], is_current=snapshot.isCurrent(), xml=snapshot_xml)
+                    session.add(db_snapshot)
+                session.commit()
+            LOG.audit(_('_sync_snapshot_to_db success'), instance=instance)
+        except Exception:
+            LOG.error(_('_sync_snapshot_to_db error'), instance=instance)
+            raise
+        finally:
+            if session:
+                session.close()
+
+    def _sync_snapshot_to_db2(self, instance):
+        # 将快照同步到数据库(只更新,不删除)
+        session = Session()
+        try:
+            snapshots = self._snapshot_list(instance)
+            if snapshots:
+                # 从数据库中获取快照
+                snapshot_list = session.query(Snapshot).filter(Snapshot.deleted == 0, Snapshot.instance_uuid == instance["uuid"])
+                snapshot_dict = dict()
+                if snapshot_list:
+                    for snapshot in snapshot_list:
+                        snapshot_dict[snapshot.name] = snapshot
+
+                # 更新数据库快照记录
+                for snapshot in snapshots:
+                    snapshot_name = snapshot.getName()
+                    snapshot_desc = self._get_description(snapshot)
+                    parent_name = self._get_parentName(snapshot)
+                    snapshot_xml = snapshot.getXMLDesc()
+                    created_at=datetime.datetime.strptime(self._get_creationTime(snapshot), "%Y-%m-%d %H:%M:%S")
+                    # 记录到数据库
+                    db_snapshot = snapshot_dict.get(snapshot_name)
+                    if db_snapshot:
+                        db_snapshot.created_at=created_at
+                        db_snapshot.xml = snapshot_xml
+                        db_snapshot.is_current = snapshot.isCurrent()
+                        db_snapshot.parent = parent_name
+                    else:
+                        db_snapshot = Snapshot(created_at=created_at, name=snapshot_name, desc=snapshot_desc, parent=parent_name, instance_uuid=instance["uuid"], project_id=instance["project_id"],
+                                               user_id=instance["user_id"], is_current=snapshot.isCurrent(), xml=snapshot_xml)
+                    session.add(db_snapshot)
+                session.commit()
+        except Exception:
+            raise
+        finally:
+            if session:
+                session.close()
+
+    def _get_creationTime(self, snapshot):
+        xml_desc = snapshot.getXMLDesc()
+        domain = etree.fromstring(xml_desc)
+        element = domain.find('creationTime')
+        localTime = time.localtime(int(element.text))
+        createTime = time.strftime("%Y-%m-%d %H:%M:%S", localTime)
+        return createTime

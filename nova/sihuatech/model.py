@@ -12,7 +12,6 @@ class Snapshot(Base,BaseMixin):
     updated_at = Column(DateTime)
     deleted_at = Column(DateTime)
     deleted = Column(Integer, default=0) #0:未删除,1:已删除
-    state = Column(Integer, default=0) #0:创建中,1:创建完成
 
     id = Column(Integer, primary_key=True)
     instance_uuid = Column(String(36))
@@ -21,6 +20,8 @@ class Snapshot(Base,BaseMixin):
     name = Column(String(32))
     desc = Column(String(32))
     parent = Column(String(32))
+    is_current = Column(Integer, default=0)#0:非当前,1:当前快照
+    xml = Column(String(8192))
 
 
 Base.metadata.create_all(engine)

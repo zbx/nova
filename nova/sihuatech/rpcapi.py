@@ -129,3 +129,16 @@ class ComputeAPI(object):
                    user_name=user_name,
                    user_password=user_password)
 
+    def live_migrate_delete_snapshot_meta(self, ctxt, instance):
+        version = '3.0'
+        cctxt = self.client.prepare(server=_compute_host(None, instance),
+                version=version)
+        return cctxt.call(ctxt, 'live_migrate_delete_snapshot_meta',
+                   instance=instance)
+
+    def live_migrate_redefine_snapshot_meta(self, ctxt, instance):
+        version = '3.0'
+        cctxt = self.client.prepare(server=_compute_host(None, instance),
+                version=version)
+        return cctxt.call(ctxt, 'live_migrate_redefine_snapshot_meta',
+                   instance=instance)
