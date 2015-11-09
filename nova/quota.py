@@ -1454,7 +1454,7 @@ resources = [
     CountableResource('server_group_members',
                       _server_group_count_members_by_user,
                       'quota_server_group_members'),
-    ReservableResource('snapshots', '_sync_snapshots', 'quota_snapshots'),
+    ReservableResource('instance_snapshots', '_sync_instance_snapshots', 'quota_snapshots'),
     ]
 
 

@@ -322,7 +322,7 @@ def _sync_instances(context, project_id, user_id, session):
                 context, project_id, user_id, session)))
 
 
-def _sync_snapshots(context, project_id, user_id, session):
+def _sync_instance_snapshots(context, project_id, user_id, session):
     return dict(snapshots= quotaManager._get_snapshots_by_project(context.project_id))
 
 def _sync_floating_ips(context, project_id, user_id, session):
@@ -350,7 +350,7 @@ QUOTA_SYNC_FUNCTIONS = {
     '_sync_fixed_ips': _sync_fixed_ips,
     '_sync_security_groups': _sync_security_groups,
     '_sync_server_groups': _sync_server_groups,
-    '_sync_snapshots': _sync_snapshots,
+    '_sync_instance_snapshots': _sync_instance_snapshots,
 }
 
 ###################
