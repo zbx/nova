@@ -50,3 +50,4 @@ doc/source/_static/nova.policy.yaml.sample
 
  # Files created by releasenotes build
 releasenotes/build
+test/

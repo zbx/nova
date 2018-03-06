@@ -28,6 +28,7 @@ from oslo_utils import strutils
 from oslo_utils import units
 import six
 
+from nova.compute import task_states
 import nova.conf
 from nova import exception
 from nova.i18n import _
@@ -41,6 +42,7 @@ from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt.storage import dmcrypt
 from nova.virt.libvirt.storage import lvm
 from nova.virt.libvirt.storage import rbd_utils
+from nova.virt.libvirt.storage import sio_utils
 from nova.virt.libvirt import utils as libvirt_utils
 
 CONF = nova.conf.CONF
@@ -469,6 +471,24 @@ class Image(object):
         don't support snapshots.
 
         :param name: name of the snapshot
+        """
+        pass
+
+    @staticmethod
+    def connect_disks(instance):
+        """Connect existing instance disks to the compute host.
+
+        Makes existing instance disks available to use with libvirt.
+
+        :param instance: instance object
+        """
+        pass
+
+    @staticmethod
+    def disconnect_disks(instance):
+        """Disconnect instance disks from the compute host.
+
+        :param instance: instance object
         """
         pass
 
@@ -1134,6 +1154,133 @@ class Ploop(Image):
         return imgmodel.LocalFileImage(self.path, imgmodel.FORMAT_PLOOP)
 
 
+class Sio(Image):
+
+    def __init__(self, instance=None, disk_name=None, path=None):
+        self.extra_specs = instance.flavor.extra_specs
+        if (instance.task_state == task_states.RESIZE_FINISH):
+            self.orig_extra_specs = instance.get_flavor('old').extra_specs
+        else:
+            self.orig_extra_specs = {}
+        self.driver = sio_utils.SIODriver(self.extra_specs)
+
+        if path:
+            vol_id = path.split('-')[-1]
+            self.volume_name = self.driver.get_volume_name(vol_id)
+        else:
+            self.volume_name = sio_utils.get_sio_volume_name(instance,
+                                                             disk_name)
+            if self.driver.check_volume_exists(self.volume_name):
+                path = self.driver.get_volume_path(self.volume_name)
+            else:
+                path = None
+
+        super(Sio, self).__init__(path, "block", "raw", is_block_dev=True)
+
+    @staticmethod
+    def is_shared_block_storage():
+        return True
+
+    @staticmethod
+    def connect_disks(instance):
+        sio_utils.SIODriver().map_volumes(instance)
+
+    @staticmethod
+    def disconnect_disks(instance):
+        sio_utils.SIODriver().cleanup_volumes(instance, unmap_only=True)
+
+    def is_rescuer(self):
+        return sio_utils.is_sio_volume_rescuer(self.volume_name)
+
+    def exists(self):
+        # workaround to allow cache method to invoke create_image for resize
+        # operation
+        return False
+
+    def create_image(self, prepare_template, base, size, *args, **kwargs):
+        generating = 'image_id' not in kwargs
+        # NOTE(ft): We assume that only root disk is recreated in rescue mode.
+        # With this assumption the code becomes more simple and fast.
+        if self.driver.check_volume_exists(self.volume_name):
+            sio_utils.verify_volume_size(size)
+            vol_size = self.get_disk_size(self.volume_name)
+            if size < vol_size:
+                LOG.debug('Cannot resize volume %s to a smaller size.',
+                          self.volume_name)
+            else:
+                # give a chance for extend_volume to migrate the volume to
+                # another pd/sp if required
+                self.driver.extend_volume(
+                    self.volume_name, size,
+                    self.extra_specs, self.orig_extra_specs)
+
+            self.path = self.driver.map_volume(self.volume_name)
+        elif generating:
+            sio_utils.verify_volume_size(size)
+            self.driver.create_volume(self.volume_name, size, self.extra_specs)
+            self.path = self.driver.map_volume(self.volume_name)
+            prepare_template(target=self.path, is_block_dev=True,
+                             *args, **kwargs)
+        else:
+            if not os.path.exists(base):
+                prepare_template(target=base, *args, **kwargs)
+
+            base_size = disk.get_disk_size(base)
+            if size is None and self.is_rescuer():
+                size = sio_utils.choose_volume_size(base_size)
+                self.extra_specs = dict(self.extra_specs)
+                self.extra_specs[sio_utils.PROVISIONING_TYPE_KEY] = 'thin'
+            else:
+                sio_utils.verify_volume_size(size)
+                self.verify_base_size(base, size, base_size=base_size)
+
+            self.driver.create_volume(self.volume_name, size, self.extra_specs)
+            self.path = self.driver.map_volume(self.volume_name)
+            self.driver.import_image(base, self.path)
+
+    def resize_image(self, size):
+        pass
+
+    def get_disk_size(self, name):
+        return self.driver.get_volume_size(self.volume_name)
+
+    def get_model(self, connection):
+        return imgmodel.SIOImage()
+
+    def libvirt_info(self, disk_bus, disk_dev, device_type, cache_mode,
+                     extra_specs, hypervisor_version, boot_order=None,
+                     disk_unit=None):
+        if self.path is None:
+            raise exception.NovaException(
+                _('Disk volume %s is not connected') % self.volume_name)
+
+        info = super(Sio, self).libvirt_info(
+            disk_bus, disk_dev, device_type, cache_mode,
+            extra_specs, hypervisor_version)
+
+        # set is_block_dev to select proper backend driver,
+        # because ScaleIO volumes are block devices in fact
+        info.driver_name = libvirt_utils.pick_disk_driver_name(
+            hypervisor_version, is_block_dev=True)
+
+        return info
+
+    def snapshot_extract(self, target, out_format):
+        self.driver.export_image(self.path, target, out_format)
+
+    def create_snap(self, name):
+        snap_name = sio_utils.get_sio_snapshot_name(self.volume_name, name)
+        self.driver.snapshot_volume(self.volume_name, snap_name)
+
+    def remove_snap(self, name, ignore_errors=False):
+        snap_name = sio_utils.get_sio_snapshot_name(self.volume_name, name)
+        self.driver.remove_volume(snap_name)
+
+    def rollback_to_snap(self, name):
+        snap_name = sio_utils.get_sio_snapshot_name(self.volume_name, name)
+        self.driver.rollback_to_snapshot(self.volume_name, snap_name)
+
+
 class Backend(object):
     def __init__(self, use_cow):
         self.BACKEND = {
@@ -1143,6 +1290,7 @@ class Backend(object):
             'lvm': Lvm,
             'rbd': Rbd,
             'ploop': Ploop,
+            'sio': Sio,
             'default': Qcow2 if use_cow else Flat
         }
 

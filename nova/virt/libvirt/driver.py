@@ -103,6 +103,7 @@ from nova.virt.libvirt import migration as libvirt_migrate
 from nova.virt.libvirt.storage import dmcrypt
 from nova.virt.libvirt.storage import lvm
 from nova.virt.libvirt.storage import rbd_utils
+from nova.virt.libvirt.storage import sio_utils
 from nova.virt.libvirt import utils as libvirt_utils
 from nova.virt.libvirt import vif as libvirt_vif
 from nova.virt.libvirt.volume import mount
@@ -1003,10 +1004,22 @@ class LibvirtDriver(driver.ComputeDriver):
                 self._cleanup_lvm(instance, block_device_info)
             if CONF.libvirt.images_type == 'rbd':
                 self._cleanup_rbd(instance)
+        if CONF.libvirt.images_type == 'sio':
+            self._cleanup_sio(instance, destroy_disks)
 
         is_shared_block_storage = False
         if migrate_data and 'is_shared_block_storage' in migrate_data:
             is_shared_block_storage = migrate_data.is_shared_block_storage
+        if (not destroy_disks and not migrate_data and
+                instance.task_state == task_states.RESIZE_REVERTING):
+            elevated = context.elevated()
+            migration = objects.Migration.get_by_instance_and_status(
+                elevated, instance.uuid, 'reverting')
+            if (migration.source_compute != migration.dest_compute and
+                    instance.host == migration.dest_compute and
+                    self._host.get_hostname() == instance.node and
+                    self.image_backend.backend().is_shared_block_storage()):
+                is_shared_block_storage = True
         if destroy_disks or is_shared_block_storage:
             attempts = int(instance.system_metadata.get('clean_attempts',
                                                         '0'))
@@ -1066,6 +1079,10 @@ class LibvirtDriver(driver.ComputeDriver):
                 ceph_conf=CONF.libvirt.images_rbd_ceph_conf,
                 rbd_user=CONF.libvirt.rbd_user)
 
+    @staticmethod
+    def _get_sio_driver():
+        return sio_utils.SIODriver()
+
     def _cleanup_rbd(self, instance):
         # NOTE(nic): On revert_resize, the cleanup steps for the root
         # volume are handled with an "rbd snap rollback" command,
@@ -1108,6 +1125,10 @@ class LibvirtDriver(driver.ComputeDriver):
             return disks
         return []
 
+    def _cleanup_sio(self, instance, destroy_disks):
+        LibvirtDriver._get_sio_driver().cleanup_volumes(
+            instance, unmap_only=not destroy_disks)
+
     def get_volume_connector(self, instance):
         root_helper = utils.get_root_helper()
         return connector.get_connector_properties(
@@ -1135,7 +1156,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # reasonably assumed that no such instances exist in the wild
         # anymore, it should be set back to False (the default) so it will
         # throw errors, like it should.
-        if root_disk.exists():
+        if CONF.libvirt.images_type != 'rbd' or root_disk.exists()():
             root_disk.remove_snap(libvirt_utils.RESIZE_SNAPSHOT_NAME,
                                   ignore_errors=True)
 
@@ -1153,6 +1174,7 @@ class LibvirtDriver(driver.ComputeDriver):
             self._undefine_domain(instance)
             self.unplug_vifs(instance, network_info)
             self.unfilter_instance(instance, network_info)
+            self.image_backend.backend().disconnect_disks(instance)
 
     def _get_volume_driver(self, connection_info):
         driver_type = connection_info.get('driver_volume_type')
@@ -1626,7 +1648,7 @@ class LibvirtDriver(driver.ComputeDriver):
         image_format = CONF.libvirt.snapshot_image_format or source_type
 
         # NOTE(bfilippov): save lvm and rbd as raw
-        if image_format == 'lvm' or image_format == 'rbd':
+        if image_format in ('lvm', 'rbd', 'sio'):
             image_format = 'raw'
 
         metadata = self._create_snapshot_metadata(instance.image_meta,
@@ -1644,7 +1666,7 @@ class LibvirtDriver(driver.ComputeDriver):
         #               It is necessary in case this situation changes in the
         #               future.
         if (self._host.has_min_version(hv_type=host.HV_DRIVER_QEMU)
-             and source_type not in ('lvm')
+             and source_type not in ('lvm', 'sio')
              and not CONF.ephemeral_storage_encryption.enabled
              and not CONF.workarounds.disable_libvirt_livesnapshot):
             live_snapshot = True
@@ -2770,6 +2792,8 @@ class LibvirtDriver(driver.ComputeDriver):
             filter_fn = lambda disk: (disk.startswith(instance.uuid) and
                                       disk.endswith('.rescue'))
             LibvirtDriver._get_rbd_driver().cleanup_volumes(filter_fn)
+        if CONF.libvirt.images_type == 'sio':
+            LibvirtDriver._get_sio_driver().cleanup_rescue_volumes(instance)
 
     def poll_rebooting_instances(self, timeout, instances):
         pass
@@ -3032,10 +3056,11 @@ class LibvirtDriver(driver.ComputeDriver):
                       specified_fs=specified_fs)
 
     @staticmethod
-    def _create_swap(target, swap_mb, context=None):
+    def _create_swap(target, swap_mb, context=None, is_block_dev=False):
         """Create a swap file of specified size."""
-        libvirt_utils.create_image('raw', target, '%dM' % swap_mb)
-        utils.mkfs('swap', target)
+        if not is_block_dev:
+            libvirt_utils.create_image('raw', target, '%dM' % swap_mb)
+        utils.mkfs('swap', target, run_as_root=True)
 
     @staticmethod
     def _get_console_log_path(instance):
@@ -5334,6 +5359,8 @@ class LibvirtDriver(driver.ComputeDriver):
                                CONF.libvirt.images_volume_group)
         elif CONF.libvirt.images_type == 'rbd':
             info = LibvirtDriver._get_rbd_driver().get_pool_info()
+        elif CONF.libvirt.images_type == 'sio':
+            info = LibvirtDriver._get_sio_driver().get_pool_info()
         else:
             info = libvirt_utils.get_fs_info(CONF.instances_path)
 
@@ -6017,7 +6044,6 @@ class LibvirtDriver(driver.ComputeDriver):
         if (dest_check_data.obj_attr_is_set('image_type') and
                 CONF.libvirt.images_type == dest_check_data.image_type and
                 self.image_backend.backend().is_shared_block_storage()):
-            # NOTE(dgenin): currently true only for RBD image backend
             return True
 
         if (dest_check_data.is_shared_instance_path and
@@ -6850,7 +6876,9 @@ class LibvirtDriver(driver.ComputeDriver):
                 libvirt_utils.write_to_file(image_disk_info_path,
                                             jsonutils.dumps(image_disk_info))
 
-            if not is_shared_block_storage:
+            if is_shared_block_storage:
+                self.image_backend.backend().connect_disks(instance)
+            else:
                 # Ensure images and backing files are present.
                 LOG.debug('Checking to make sure images and backing files are '
                           'present before live migration.', instance=instance)
@@ -6870,6 +6898,23 @@ class LibvirtDriver(driver.ComputeDriver):
                     # Please see bug/1246201 for more details.
                     src = "%s:%s/disk.config" % (instance.host, instance_dir)
                     self._remotefs.copy_file(src, instance_dir)
+
+            if (configdrive.required_by(instance) and
+                    CONF.config_drive_format == 'iso9660' and
+                    (not is_shared_block_storage or
+                     self._get_disk_config_image_type() !=
+                     CONF.libvirt.images_type)):
+                # NOTE(pkoniszewski): Due to a bug in libvirt iso config
+                # drive needs to be copied to destination prior to
+                # migration when instance path is not shared and block
+                # storage is not shared. Files that are already present
+                # on destination are excluded from a list of files that
+                # need to be copied to destination. If we don't do that
+                # live migration will fail on copying iso config drive to
+                # destination and writing to read-only device.
+                # Please see bug/1246201 for more details.
+                src = "%s:%s/disk.config" % (instance.host, instance_dir)
+                self._remotefs.copy_file(src, instance_dir)
 
             if not is_block_migration:
                 # NOTE(angdraug): when block storage is shared between source
@@ -7151,6 +7196,10 @@ class LibvirtDriver(driver.ComputeDriver):
             disk_dev = vol['mount_device'].rpartition("/")[2]
             volume_devices.add(disk_dev)
 
+        no_block_devices = (
+            block_device_info is not None and
+            self.image_backend.backend().is_shared_block_storage())
+
         disk_info = []
 
         if (guest_config.virt_type == 'parallels' and
@@ -7187,6 +7236,11 @@ class LibvirtDriver(driver.ComputeDriver):
             if target in volume_devices:
                 LOG.debug('skipping disk %(path)s (%(target)s) as it is a '
                           'volume', {'path': path, 'target': target})
+                continue
+
+            if no_block_devices and disk_type == 'block':
+                LOG.debug('skipping disk %(path)s as it may belong to '
+                          'used shared block storage')
                 continue
 
             if device.root_name == 'filesystem':
@@ -7415,8 +7469,12 @@ class LibvirtDriver(driver.ComputeDriver):
         # Checks if the migration needs a disk resize down.
         root_down = flavor.root_gb < instance.flavor.root_gb
         ephemeral_down = flavor.ephemeral_gb < eph_size
-        booted_from_volume = self._is_booted_from_volume(block_device_info)
-
+        block_device_mapping = driver.block_device_info_get_mapping(
+                                                        block_device_info)
+        root_disk = block_device.get_root_bdm(block_device_mapping)
+        booted_from_volume = (
+            self._is_booted_from_volume(block_device_info)
+            and root_disk)
         if (root_down and not booted_from_volume) or ephemeral_down:
             reason = _("Unable to resize disk down.")
             raise exception.InstanceFaultRollback(
@@ -7536,6 +7594,7 @@ class LibvirtDriver(driver.ComputeDriver):
                          block_device_info=None, power_on=True):
         LOG.debug("Starting finish_migration", instance=instance)
 
+        self.image_backend.backend().connect_disks(instance)
         block_disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
                                                   instance,
                                                   image_meta,
@@ -7653,6 +7712,7 @@ class LibvirtDriver(driver.ComputeDriver):
             self._cleanup_failed_migration(inst_base)
             utils.execute('mv', inst_base_resize, inst_base)
 
+        self.image_backend.backend().connect_disks(instance)
         root_disk = self.image_backend.by_name(instance, 'disk')
         # Once we rollback, the snapshot is no longer needed, so remove it
         # TODO(nic): Remove the try/except/finally in a future release
@@ -7663,7 +7723,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # anymore, the try/except/finally should be removed,
         # and ignore_errors should be set back to False (the default) so
         # that problems throw errors, like they should.
-        if root_disk.exists():
+        if CONF.libvirt.images_type != 'rbd' or root_disk.exists():
             try:
                 root_disk.rollback_to_snap(libvirt_utils.RESIZE_SNAPSHOT_NAME)
             except exception.SnapshotNotFound:

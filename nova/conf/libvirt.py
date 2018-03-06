@@ -628,7 +628,7 @@ Possible values:
 libvirt_imagebackend_opts = [
     cfg.StrOpt('images_type',
                default='default',
-               choices=('raw', 'flat', 'qcow2', 'lvm', 'rbd', 'ploop',
+               choices=('raw', 'flat', 'qcow2', 'lvm', 'rbd', 'ploop', 'sio',
                         'default'),
                help="""
 VM Images format.
