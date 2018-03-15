@@ -12,7 +12,7 @@ from six.moves import range
 import time
 
 from oslo_concurrency import processutils
-from oslo_config import cfg
+
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import units
@@ -22,6 +22,7 @@ from nova.i18n import _
 from nova import utils
 from nova.virt import images
 from nova.virt.libvirt import utils as libvirt_utils
+import nova.conf
 
 try:
     import siolib
@@ -31,7 +32,7 @@ except ImportError:
     siolib = None
 
 LOG = logging.getLogger(__name__)
-CONF = cfg.CONF
+CONF = nova.conf.CONF
 
 if siolib:
     CONF.register_group(siolib.SIOGROUP)
@@ -44,7 +45,6 @@ STORAGE_POOL_KEY = 'sio:sp_name'
 PROVISIONING_TYPE_KEY = 'sio:provisioning_type'
 PROVISIONING_TYPES_MAP = {'thin': 'ThinProvisioned',
                           'thick': 'ThickProvisioned'}
-
 
 def verify_volume_size(requested_size):
     """Verify that ScaleIO can have a volume with specified size.
@@ -148,9 +148,7 @@ class SIODriver(object):
                 self.sp_name = self.sp_name.encode('utf8')
 
         # IOCTL reference to ScaleIO API python library
-        self.ioctx = scaleio.ScaleIO(conf_filepath="/etc/kolla/nova-compute/nova.conf",pd_name="default",
-                                     sp_name="default",
-                                     conf=CONF)
+        self.ioctx = scaleio.ScaleIO(conf_filepath="/etc/kolla/nova-compute/nova.conf", conf=CONF)
 
     def get_pool_info(self):
         """Return the total storage pool info."""
