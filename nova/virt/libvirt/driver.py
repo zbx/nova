@@ -1156,7 +1156,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # reasonably assumed that no such instances exist in the wild
         # anymore, it should be set back to False (the default) so it will
         # throw errors, like it should.
-        if CONF.libvirt.images_type != 'rbd' or root_disk.exists()():
+        if CONF.libvirt.images_type != 'rbd' or root_disk.exists():
             root_disk.remove_snap(libvirt_utils.RESIZE_SNAPSHOT_NAME,
                                   ignore_errors=True)
 
@@ -7516,6 +7516,7 @@ class LibvirtDriver(driver.ComputeDriver):
         disk_info = self._get_instance_disk_info(instance, block_device_info)
 
         try:
+            utils.execute('mkdir', '-p', inst_base)
             utils.execute('mv', inst_base, inst_base_resize)
             # if we are migrating the instance with shared storage then
             # create the directory.  If it is a remote node the directory
