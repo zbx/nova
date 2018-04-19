@@ -142,3 +142,12 @@ class ComputeAPI(object):
                 version=version)
         return cctxt.call(ctxt, 'live_migrate_redefine_snapshot_meta',
                    instance=instance)
+
+    def guest_live_update(self, ctxt, instance, vcpus,memory_size):
+        version = '3.0'
+        cctxt = self.client.prepare(server=_compute_host(None, instance),
+                version=version)
+        cctxt.call(ctxt, 'guest_live_update',
+                   instance=instance,
+                   vcpus=vcpus,
+                   memory_size=memory_size)

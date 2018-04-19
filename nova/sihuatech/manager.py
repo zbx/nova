@@ -72,7 +72,7 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         context = context.elevated()
         # 申请快照配额
         quotas = objects.Quotas(context)
-        quotas.reserve(context, snapshots=1)
+        quotas.reserve(context, instance_snapshots=1)
         try:
             LOG.audit(_('snapshot_create'), context=context, instance=instance)
             conn = libvirt.open('qemu:///system')
@@ -115,7 +115,7 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         context = context.elevated()
         # 释放配额
         quotas = objects.Quotas(context)
-        quotas.reserve(context, snapshots=-1)
+        quotas.reserve(context, instance_snapshots=-1)
         session = Session()
         try:
             LOG.audit(_('snapshot_delete'), context=context, instance=instance)
@@ -191,6 +191,64 @@ class ComputeManager(nova.compute.manager.ComputeManager):
         except Exception:
             LOG.exception('set_user_password Failed', instance=instance)
             raise
+
+    def guest_live_update(self, context, instance, vcpus,memory_size):
+        context = context.elevated()
+        LOG.audit(_('guest_live_update'), context=context, instance=instance)
+        self._guest_set_vcpus(instance,vcpus)
+        self._guest_set_memory(instance,memory_size)
+
+        
+    def _guest_set_vcpus(self, instance, vcpus):
+        LOG.audit(_('_guest_set_vcpus'), instance=instance)
+        #设置vcpus
+        try:
+            cmd = ('virsh', 'qemu-monitor-command', instance['name'], '--hmp','cpu-add %s' % vcpus )
+            result=utils.execute(*cmd)
+            LOG.info("vcpus:%s,result:%s" % (vcpus,result[0]))
+
+            vcpu_list=self._get_vcpus(instance)
+            self._set_vcpu_count(vcpu_list,int(vcpus))
+            #virsh qemu-agent-command instance-00000063 '{ "execute": "guest-set-vcpus","arguments":{"vcpus":[{"logical-id":2,"online":false}]}}'
+            args = '''{ "execute": "guest-set-vcpus", "arguments": { "vcpus":%s }}''' % json.dumps(vcpu_list)
+            cmd = ('virsh', 'qemu-agent-command', instance['name'], args )
+            result=utils.execute(*cmd)
+            LOG.info("qemu-agent-command cmd:%s" % cmd)
+            LOG.info("qemu-agent-command result:%s" ,result[0])
+        except Exception:
+            LOG.exception('', instance=instance)
+            raise
+        
+    def _guest_set_memory(self, instance,memory_size):
+        LOG.audit(_('_guest_set_memory'), instance=instance)
+        #设置memory
+        try:
+            cmd = ('virsh', 'qemu-monitor-command', instance['name'], '--hmp','balloon %s' % memory_size )
+            result=utils.execute(*cmd)
+            LOG.info("memory_size:%s,result:%s" % (memory_size,result[0]))
+        except Exception:
+            LOG.exception('', instance=instance)
+            raise
+
+    def _get_vcpu_count(self, instance):
+        return len(self._get_vcpus(instance))
+    
+    def _get_vcpus(self, instance):
+        args = '''{ "execute": "guest-get-vcpus"}'''
+        cmd = ('virsh', 'qemu-agent-command', instance['name'], args )
+        str=utils.execute(*cmd)
+        obj_json=json.loads(str[0])
+        return obj_json['return']
+    
+    def _set_vcpu_count(self, vcpus,count):
+        if vcpus:
+            for i in range(0,len(vcpus)):
+                cpu=vcpus[i]
+                if i<count:
+                    cpu["online"]=True
+                else:
+                    cpu["online"]=False
+        
 
 
     ##=========================================================================================================

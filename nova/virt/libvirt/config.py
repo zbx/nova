@@ -1609,8 +1609,10 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         if self.memtune is not None:
             root.append(self.memtune.format_dom())
         if self.cpuset is not None:
-            vcpu = self._text_node("vcpu", self.vcpus)
+            #vcpu = self._text_node("vcpu", self.vcpus)
+            vcpu = self._text_node("vcpu", 4)
             vcpu.set("cpuset", hardware.format_cpu_spec(self.cpuset))
+            vcpu.set("current", u'1')
             root.append(vcpu)
         else:
             root.append(self._text_node("vcpu", self.vcpus))
@@ -1693,8 +1695,8 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         if self.clock is not None:
             root.append(self.clock.format_dom())
 
-        if self.cpu is not None:
-            root.append(self.cpu.format_dom())
+#         if self.cpu is not None:
+#             root.append(self.cpu.format_dom())
 
         self._format_devices(root)
 
